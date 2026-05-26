@@ -1,10 +1,17 @@
 FROM python:3.14-slim
 
-# VRL-19 — void-fcc sidecar: wraps free-claude-code PyPI package as an
+# VRL-19 — void-fcc sidecar: wraps free-claude-code as an
 # Anthropic-API-compatible HTTP server that proxies to DeepSeek.
-# Pinned to free-claude-code==2.0.0 (PyPI). Bump explicitly by PR.
+# Pinned to upstream commit 8ae7795961f05f425bd3e7418f85f2ccec7f4600
+# (2026-05-24, version = "2.0.0" in pyproject.toml).
+# Not on PyPI — install from GitHub source directly.
+# Bump: update the @<sha> pin and open a PR review on upstream changes.
 
-RUN pip install --no-cache-dir free-claude-code==2.0.0
+RUN apt-get update && apt-get install -y --no-install-recommends git && \
+    pip install --no-cache-dir \
+      "git+https://github.com/Alishahryar1/free-claude-code.git@8ae7795961f05f425bd3e7418f85f2ccec7f4600" && \
+    apt-get purge -y --auto-remove git && \
+    rm -rf /var/lib/apt/lists/*
 
 EXPOSE 8082
 
