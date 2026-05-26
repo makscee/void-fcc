@@ -23,17 +23,16 @@ jobs:
       - name: build smoke image
         run: docker build -t fcc-smoke .
 
-      - name: smoke test /v1/models
+      - name: smoke test /health
         run: |
-          # ANTHROPIC_AUTH_TOKEN intentionally omitted: fcc treats empty token
-          # as "no auth required" (allow-all), so /v1/models is reachable without
-          # a bearer header. DEEPSEEK_API_KEY=dummy is accepted at server start
-          # (provider init errors surface on first real request, not on startup).
+          # /health is unauthenticated — returns {"status":"healthy"} with no key.
+          # DEEPSEEK_API_KEY=dummy is accepted at startup (provider errors surface
+          # on first real request, not at init time).
           docker run -d --rm -p 8082:8082 \
             -e DEEPSEEK_API_KEY=dummy \
             --name fcc-smoke-run fcc-smoke
           sleep 10
-          curl -fsS http://127.0.0.1:8082/v1/models
+          curl -fsS http://127.0.0.1:8082/health
 
   publish:
     name: build + push image
