@@ -13,6 +13,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
     apt-get purge -y --auto-remove git && \
     rm -rf /var/lib/apt/lists/*
 
+# VCD-34 r5: patch deepseek/request.py to inject stub thinking blocks for
+# tool follow-up turns. deepseek-v4-pro/-flash always emit thinking blocks;
+# DeepSeek requires them passed back in subsequent turns. Since claude code
+# strips thinking from its context, FCC injects empty stubs to satisfy the
+# DeepSeek API requirement.
+COPY patches/deepseek_request_vcd34.py \
+     /usr/local/lib/python3.14/site-packages/providers/deepseek/request.py
+
 EXPOSE 8082
 
 # fcc reads HOST/PORT from env; defaults are 0.0.0.0:8082 in settings.py.
