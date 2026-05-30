@@ -20,6 +20,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: unit tests (patch overlay — VRL-44 web_search pass-through)
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pytest tests/ -q
+
       - name: build smoke image
         run: docker build -t fcc-smoke .
 

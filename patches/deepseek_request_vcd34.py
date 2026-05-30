@@ -13,13 +13,14 @@ from core.anthropic.native_messages_request import dump_raw_messages_request
 from providers.exceptions import InvalidRequestError
 
 # Block types not supported on DeepSeek partial Anthropic-compatible API.
+# VRL-44: web_search/web_fetch ARE supported natively on DeepSeek's /anthropic
+# endpoint (the one this provider already targets). The server_tool_use and
+# web_*_tool_result blocks must pass through so the search round-trip survives
+# follow-up turns. Only image/document remain genuinely unsupported (no vision).
 _UNSUPPORTED_MESSAGE_BLOCK_TYPES = frozenset(
     {
         "image",
         "document",
-        "server_tool_use",
-        "web_search_tool_result",
-        "web_fetch_tool_result",
     }
 )
 
@@ -108,17 +109,6 @@ def _strip_unsupported_attachment_blocks(messages: Any) -> Any:
     return stripped
 
 
-def _is_server_listed_tool(tool: Mapping[str, Any]) -> bool:
-    """True for Anthropic web_search / web_fetch-style tool definitions (listed tools)."""
-    name = (tool.get("name") or "").strip()
-    if name in ("web_search", "web_fetch"):
-        return True
-    typ = tool.get("type")
-    if isinstance(typ, str):
-        return typ.startswith("web_search") or typ.startswith("web_fetch")
-    return False
-
-
 def _walk_block_list_for_unsupported(blocks: Any, *, where: str) -> None:
     if not isinstance(blocks, list):
         return
@@ -143,15 +133,11 @@ def _validate_deepseek_native_request_dict(data: dict[str, Any]) -> None:
             "DeepSeek native does not support mcp_servers on requests."
         )
 
-    for tool in data.get("tools") or ():
-        if not isinstance(tool, dict):
-            continue
-        if _is_server_listed_tool(tool):
-            raise InvalidRequestError(
-                "DeepSeek native does not support listed Anthropic server tools "
-                "(web_search / web_fetch). Remove them or use a different provider."
-            )
-
+    # VRL-44: web_search/web_fetch server-tool defs pass through untouched —
+    # DeepSeek's /anthropic endpoint executes the search server-side. (Previously
+    # this loop hard-rejected them on the now-stale assumption that DeepSeek had
+    # no native search.) image/document and mcp_servers remain rejected below /
+    # above respectively.
     for i, message in enumerate(data.get("messages") or ()):
         if not isinstance(message, dict):
             continue
