@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -137,6 +138,13 @@ class NativeSseBlockPolicyState:
     # Holds text withheld from a text_delta (partial DSML marker or in-span body)
     # that must be reconciled against the next delta for the same block.
     dsml_text_carry: dict[int, str] = field(default_factory=dict)
+    # VRL-52: tool-name memory. Captures (id, name) from EVERY tool_use /
+    # server_tool_use content_block_start we observe — including starts that
+    # fail the int-index guard and never become a segment — so an orphan
+    # input_json_delta (no prior recorded start) can recover the real name
+    # instead of opening a nameless, client-unparseable tool_use block.
+    tool_name_hints: dict[int, dict[str, Any]] = field(default_factory=dict)
+    last_tool_name_hint: dict[str, Any] | None = None
 
 
 def format_native_sse_event(event_name: str | None, data_text: str) -> str:
@@ -178,6 +186,32 @@ def _delta_type_to_block_kind(delta_type: Any) -> str | None:
     if delta_type == "input_json_delta":
         return "tool_use"
     return None
+
+
+def _record_tool_name_hint(state: NativeSseBlockPolicyState, block: Any, index: Any) -> None:
+    """Remember a tool_use/server_tool_use start's id+name for later recovery.
+
+    Captures from any observed start (including ones that fail the int-index
+    guard) so an orphan input_json_delta can be given the real name. Keyed by
+    int index when available; also kept as `last_tool_name_hint` (DeepSeek emits
+    tool calls sequentially, so the most recent dangling start is the best
+    fallback for an un-keyed orphan delta).
+    """
+    if not isinstance(block, dict):
+        return
+    if block.get("type") not in ("tool_use", "server_tool_use"):
+        return
+    name = block.get("name")
+    if not (isinstance(name, str) and name.strip()):
+        return
+    tool_id = block.get("id")
+    hint = {
+        "id": tool_id if isinstance(tool_id, str) and tool_id else None,
+        "name": name,
+    }
+    if isinstance(index, int):
+        state.tool_name_hints[index] = hint
+    state.last_tool_name_hint = hint
 
 
 def _synthetic_start_content_block(
@@ -290,6 +324,7 @@ def transform_native_sse_block_event(
         block_type = block.get("type")
         upstream_index = payload.get("index")
         if not isinstance(upstream_index, int):
+            _record_tool_name_hint(state, block, upstream_index)
             return event
         if _should_drop_block_type(block_type, thinking_enabled=thinking_enabled):
             state.dropped_indexes.add(upstream_index)
@@ -299,6 +334,7 @@ def transform_native_sse_block_event(
             return event
         prefix = _synthetic_close_other_open_blocks(state, upstream_index)
         stored = copy.deepcopy(block)
+        _record_tool_name_hint(state, block, upstream_index)
         new_idx = _allocate_new_segment(
             state,
             upstream_index,
@@ -375,29 +411,53 @@ def transform_native_sse_block_event(
             return prefix + format_native_sse_event(event_name, json.dumps(payload))
 
         # Delta with no prior `content_block_start` in this stream
-        if block_kind in ("text", "tool_use"):
+        if block_kind == "text":
             synthetic_block = _synthetic_start_content_block(
                 block_kind,
                 upstream_index=upstream_index,
             )
-            new_idx = _allocate_new_segment(
-                state,
-                upstream_index,
-                block_type=block_kind,
-                last_start_block=copy.deepcopy(synthetic_block),
-            )
-            start_payload = {
-                "type": "content_block_start",
-                "index": new_idx,
-                "content_block": synthetic_block,
+        elif block_kind == "tool_use":
+            hint = state.tool_name_hints.get(upstream_index) or state.last_tool_name_hint
+            if not (isinstance(hint, dict) and isinstance(hint.get("name"), str) and hint["name"].strip()):
+                # Unrecoverable: do NOT open a nameless tool_use block. Suppress
+                # the orphan delta. Losing one un-nameable tool call (agent
+                # retries) beats poisoning the stream with an unparseable block.
+                print(
+                    f"[VRL-52] suppressing orphan input_json_delta at index "
+                    f"{upstream_index}: no recoverable tool name",
+                    file=sys.stderr,
+                )
+                return None
+            stored_tool_block = {
+                "type": "tool_use",
+                "id": hint.get("id") or f"toolu_or_{upstream_index}",
+                "name": hint["name"],
+                "input": {},
             }
-            prefix = format_native_sse_event(
-                "content_block_start", json.dumps(start_payload)
+            synthetic_block = _synthetic_start_content_block(
+                block_kind,
+                upstream_index=upstream_index,
+                stored_tool_block=stored_tool_block,
             )
-            payload["index"] = new_idx
-            return prefix + format_native_sse_event(event_name, json.dumps(payload))
-        # thinking: pass through raw (unusual upstream shape)
-        return event
+        else:
+            # thinking: pass through raw (unusual upstream shape)
+            return event
+        new_idx = _allocate_new_segment(
+            state,
+            upstream_index,
+            block_type=block_kind,
+            last_start_block=copy.deepcopy(synthetic_block),
+        )
+        start_payload = {
+            "type": "content_block_start",
+            "index": new_idx,
+            "content_block": synthetic_block,
+        }
+        prefix = format_native_sse_event(
+            "content_block_start", json.dumps(start_payload)
+        )
+        payload["index"] = new_idx
+        return prefix + format_native_sse_event(event_name, json.dumps(payload))
 
     if event_name == "content_block_stop":
         upstream_index = payload.get("index")
