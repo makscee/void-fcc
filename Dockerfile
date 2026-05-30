@@ -21,6 +21,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
 COPY patches/deepseek_request_vcd34.py \
      /usr/local/lib/python3.14/site-packages/providers/deepseek/request.py
 
+# VRL-44: patch the shared native SSE block policy to strip leaked DeepSeek
+# DSML tool-call markup (<｜｜DSML｜｜tool_calls>…) out of the user-facing text
+# content block. DeepSeek's /anthropic endpoint sometimes serializes a
+# follow-up tool call as raw markup inside a text_delta instead of a proper
+# server_tool_use block; this filter removes those spans (streaming-aware, a
+# no-op when no DSML markers are present, so other native providers are
+# unaffected). web_search pass-through (request.py patch above) is preserved.
+COPY patches/native_sse_block_policy_vrl44.py \
+     /usr/local/lib/python3.14/site-packages/core/anthropic/native_sse_block_policy.py
+
 EXPOSE 8082
 
 # fcc reads HOST/PORT from env; defaults are 0.0.0.0:8082 in settings.py.
